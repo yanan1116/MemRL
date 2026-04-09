@@ -87,7 +87,7 @@ class BCBRunner:
         # If None, falls back to rl_config.sim_threshold (or rl_config.tau).
         retrieve_threshold: Optional[float] = None,
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
-        memory_budget_tokens: int = 2000,
+        memory_budget_tokens: int = 0,
         bcb_repo: Optional[str] = None,
         untrusted_hard_timeout_s: float = 120.0,
         eval_timeout_s: float = 60.0,
@@ -204,7 +204,8 @@ class BCBRunner:
                 continue
 
             # Truncate if needed (memory_rl uses a rough per-entry budget).
-            if len(content) > self.memory_budget_tokens // len(selected_mems):
+            # budget=0 means unlimited – skip truncation entirely.
+            if self.memory_budget_tokens > 0 and len(content) > self.memory_budget_tokens // len(selected_mems):
                 content = content[: self.memory_budget_tokens // len(selected_mems)] + "..."
 
             parts.append(f"## Example {i} [{outcome.upper()}]")

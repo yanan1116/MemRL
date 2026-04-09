@@ -76,7 +76,9 @@ class MemoryConfig(BaseModel):
     memory_confidence: float = Field(default=100.0, ge=0, le=100,
                                     description="Confidence score for new memories")
     add_similarity_threshold: float = Field(default=0.9,
-                                    description="similarity_threshold for add memory")     
+                                    description="similarity_threshold for add memory")
+    memory_budget_tokens: int = Field(default=0,
+                                      description="Token budget (character-level) for injected memory context. 0 means unlimited (no truncation).")
     # MemOS configuration
     mos_config_path: str = Field(default="configs/mos_config.json",
                                 description="Path to MemOS configuration file")
