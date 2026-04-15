@@ -1,18 +1,18 @@
 # LLM provider configuration
 llm:
   provider: "openai"
-  api_key: "sk-REPLACE_ME"
-  base_url: "https://api.openai.com/v1"
-  model: "gpt-5-mini"
+  api_key: "yyy"
+  base_url: "http://10.225.68.29:1700/v1"
+  model: "Qwen/Qwen2.5-7B-Instruct"
   temperature: 0
   max_tokens: 4096
 
 # Embedding provider configuration  
 embedding:
   provider: "openai"
-  api_key: "sk-REPLACE_ME"
-  base_url: "https://api.openai.com/v1"
-  model: "text-embedding-3-large"
+  api_key: "yyy"
+  base_url: "http://10.225.68.29:1707/v1"
+  model: "Qwen/Qwen3-Embedding-4B"
   max_text_len: 4096
 
 # Memory system configuration
@@ -21,7 +21,14 @@ memory:
   build_strategy: "proceduralization"
   retrieve_strategy: "query"
   update_strategy: "adjustment"
-  
+
+# memory:
+#     # for RAG baseline
+#     build_strategy: "trajectory" # store raw past trajectories instead of more processed procedural memories
+#     retrieve_strategy: "query"  # retrieve by semantic similarity of task/query
+#     update_strategy: "vanilla"  # simple add-to-memory behavior without the stronger adjustment mechanism
+
+
   # Memory parameters
   k_retrieve: 5
   max_keywords: 8
@@ -44,13 +51,14 @@ environment:
 experiment:
   random_seed: 42
   enable_value_driven: true
-  experiment_name: 'alfworld_memrl'  # Name for Trail.
-  mode: 'train'  # control whether to only test, if set as 'test' won't run on train spilt.
+  experiment_name: 'alfworld_memrl_qwen2p5_7B__init_q_0'  # Name for Trail.
+
   num_sections: 10  # Number of sections (re-uses the same training set each section)
   batch_size: 32  # Number of parallel environments for sampling.
   dataset_ratio: 1.0  # Proportion of files randomly selected for training (rest used for validation)
-  few_shot_path: 'data/alfworld/alfworld_examples.json' # path for alfworld examples
-  baseline_mode: none   # passk
+  shuffle_train_each_epoch: true  # Shuffle the train games at the start of each epoch/section.
+  few_shot_path: 'configs/alfworld/alfworld_examples.json' # path for alfworld examples
+  baseline_mode: none   # passk or reflection
   baseline_k: 10
 
   # Output settings
@@ -67,7 +75,7 @@ experiment:
 rl_config:
   epsilon: 0             # ε-greedy exploration probability
   tau: 0.62              # unknown detection threshold on similarity
-  alpha: 0.3             # Q-learning step size
+  alpha: 0.3             # Q-learning step size # set to 0 for baseline MemP
   gamma: 0.0             # discount factor (single-step default)
   q_init_pos: 0          # optimistic initialization
   q_init_neg: 0          # negative q init

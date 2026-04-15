@@ -36,6 +36,11 @@ def setup_logging(project_root: Path, name: str):
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setFormatter(formatter)
     root_logger.addHandler(console_handler)
+
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("openai._base_client").setLevel(logging.WARNING)
+
     logging.info(f"Logging configured. Log file: {log_filepath}")
     return log_dir
 
@@ -53,16 +58,73 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--temperature", type=float, default=None)
     p.add_argument("--max_tokens", type=int, default=None)
+    p.add_argument(
+        "--set",
+        dest="overrides",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Override config values using dot paths, e.g. --set rl_config.alpha=0.8",
+    )
     return p.parse_args()
 
 
 logger = logging.getLogger(__name__)
 
 
+def _parse_override_value(raw: str):
+    lowered = raw.lower()
+    if lowered == "true":
+        return True
+    if lowered == "false":
+        return False
+    if lowered == "null" or lowered == "none":
+        return None
+
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return raw
+
+
+def _apply_overrides(config_dict: dict, overrides: list[str]) -> dict:
+    updated = json.loads(json.dumps(config_dict))
+    for override in overrides:
+        if "=" not in override:
+            raise ValueError(f"Invalid override '{override}'. Expected KEY=VALUE.")
+
+        key_path, raw_value = override.split("=", 1)
+        key_path = key_path.strip()
+        if not key_path:
+            raise ValueError(f"Invalid override '{override}'. Empty key path.")
+
+        value = _parse_override_value(raw_value.strip())
+        keys = key_path.split(".")
+
+        current = updated
+        for key in keys[:-1]:
+            if key not in current:
+                raise KeyError(f"Unknown override path '{key_path}': missing '{key}'.")
+            if not isinstance(current[key], dict):
+                raise KeyError(f"Unknown override path '{key_path}': '{key}' is not a mapping.")
+            current = current[key]
+
+        leaf_key = keys[-1]
+        if leaf_key not in current:
+            raise KeyError(f"Unknown override path '{key_path}': missing '{leaf_key}'.")
+        current[leaf_key] = value
+
+    return updated
+
+
 def main():
     args = parse_args()
     try:
         cfg = MempConfig.from_yaml(args.config)
+        cfg_data = cfg.model_dump()
+        if args.overrides:
+            cfg_data = _apply_overrides(cfg_data, args.overrides)
+            cfg = MempConfig(**cfg_data)
         setup_logging(project_root, cfg.experiment.experiment_name)
 
         out_dir = Path(cfg.experiment.output_dir)
@@ -71,6 +133,12 @@ def main():
         log_dir = out_dir / "alfworld" / f"exp_{cfg.experiment.experiment_name}_{run_id}" / "local_cache"
         log_dir.mkdir(parents=True, exist_ok=True)
 
+        logger.info("resolved config ===>\n%s", json.dumps(cfg.model_dump(), indent=2, ensure_ascii=False))
+        if args.overrides:
+            logger.info("applied overrides ===>\n%s", json.dumps(args.overrides, indent=2, ensure_ascii=False))
+        
+        os._exit(1)
+        
         llm_provider = OpenAILLM(
             api_key=cfg.llm.api_key,
             base_url=cfg.llm.base_url,
@@ -90,30 +158,36 @@ def main():
         temp_dir = tempfile.mkdtemp(prefix="memp_alfworld_run_")
         logger.info(f"Using temporary directory for runtime artifacts: {temp_dir}")
 
+        if cfg.llm.provider == "azure":
+            mos_llm_config = {
+                "model_name_or_path": cfg.llm.model,
+                "api_key": cfg.llm.api_key,
+                "base_url": cfg.llm.base_url,
+                "api_version": cfg.llm.api_version,
+            }
+        else:
+            mos_llm_config = {
+                "model_name_or_path": cfg.llm.model,
+                "api_key": cfg.llm.api_key,
+                "api_base": cfg.llm.base_url,
+            }
+
         mos_config = {
             "chat_model": {
-                "backend": "openai",
-                "config": {
-                    "model_name_or_path": cfg.llm.model,
-                    "api_key": cfg.llm.api_key,
-                    "api_base": cfg.llm.base_url,
-                },
+                "backend": cfg.llm.provider,
+                "config": mos_llm_config,
             },
             "mem_reader": {
                 "backend": "simple_struct",
                 "config": {
                     "llm": {
-                        "backend": "openai",
-                        "config": {
-                            "model_name_or_path": cfg.llm.model,
-                            "api_key": cfg.llm.api_key,
-                            "api_base": cfg.llm.base_url,
-                        },
+                        "backend": cfg.llm.provider,
+                        "config": mos_llm_config,
                     },
                     "embedder": {
                         "backend": "universal_api",
                         "config": {
-                            "provider": "openai",
+                            "provider": cfg.embedding.provider,
                             "model_name_or_path": cfg.embedding.model,
                             "api_key": cfg.embedding.api_key,
                             "base_url": cfg.embedding.base_url,
@@ -174,10 +248,10 @@ def main():
             rl_config=rl_config,
             bon=cfg.experiment.bon,
             retrieve_k=cfg.memory.k_retrieve,
-            mode=cfg.experiment.mode,
             valid_interval=cfg.experiment.valid_interval,
             test_interval=cfg.experiment.test_interval,
             dataset_ratio=cfg.experiment.dataset_ratio,
+            shuffle_train_each_epoch=getattr(cfg.experiment, "shuffle_train_each_epoch", False),
             ckpt_resume_enabled=getattr(cfg.experiment, "ckpt_resume_enabled", False),
             ckpt_resume_path=getattr(cfg.experiment, "ckpt_resume_path", None),
             ckpt_resume_epoch=getattr(cfg.experiment, "ckpt_resume_epoch", None),

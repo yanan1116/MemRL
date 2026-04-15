@@ -6,7 +6,7 @@ for various AI service providers used in the Memp system.
 """
 
 from .base import BaseLLM, BaseEmbedder, ProviderError, LLMError, EmbedderError
-from .llm import OpenAILLM, MockLLM
+from .llm import OpenAILLM
 from .embedding import OpenAIEmbedder, LocalEmbedder, MockEmbedder, AverageEmbedder
 
 __all__ = [
@@ -19,7 +19,6 @@ __all__ = [
     
     # LLM providers
     "OpenAILLM",
-    "MockLLM",
     
     # Embedding providers
     "OpenAIEmbedder",

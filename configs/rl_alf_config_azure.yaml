@@ -1,0 +1,91 @@
+# LLM provider configuration
+llm:
+  provider: "azure"
+  api_key: ""
+  base_url: "https://sub-lgeci-tai-opneai.openai.azure.com/"
+  api_version: "2024-10-01-preview"
+  model: "gpt-5-mini"
+  temperature: 0
+  max_tokens: 4096
+
+# Embedding provider configuration  
+embedding:
+  provider: "openai"
+  api_key: "yyy"
+  base_url: "http://10.225.68.24:1707/v1"
+  model: "Qwen/Qwen3-Embedding-4B"
+  max_text_len: 4096
+
+# Memory system configuration
+memory:
+  # Strategy configuration (main combination from paper)
+  build_strategy: "proceduralization"
+  retrieve_strategy: "query"
+  update_strategy: "adjustment"
+
+# memory:
+#     # for RAG baseline
+#     build_strategy: "trajectory" # store raw past trajectories instead of more processed procedural memories
+#     retrieve_strategy: "query"  # retrieve by semantic similarity of task/query
+#     update_strategy: "vanilla"  # simple add-to-memory behavior without the stronger adjustment mechanism
+
+
+  # Memory parameters
+  k_retrieve: 5
+  max_keywords: 8
+  confidence_threshold: 0.0
+  memory_confidence: 100.0
+  add_similarity_threshold: 0.90 
+  # MemOS configuration
+  mos_config_path: "configs/mos_config_final.json"
+  user_id: "memrl_user"
+  sim_norm_mean: 0.5187
+  sim_norm_std: 0.1203
+
+# Environment-specific settings
+environment:
+  # ALFWorld settings
+  alfworld_config_path: "configs/envs/alfworld.yaml"
+  alfworld_env_type: "AlfredTWEnv"
+
+# Experiment configuration
+experiment:
+  random_seed: 42
+  enable_value_driven: true
+  experiment_name: 'alfworld_memrl_azure_gpt'  # Name for Trail.
+
+  num_sections: 3  # Number of sections (re-uses the same training set each section)
+  batch_size: 16  # Number of parallel environments for sampling.
+  dataset_ratio: 0.2  # Proportion of files randomly selected for training (rest used for validation)
+  shuffle_train_each_epoch: true  # Shuffle the train games at the start of each epoch/section.
+  few_shot_path: 'configs/alfworld/alfworld_examples.json' # path for alfworld examples
+  baseline_mode: none   # passk or reflection
+  baseline_k: 10
+
+  # Output settings
+  output_dir: "./results"
+  save_trajectories: true
+  save_memories: true
+  ckpt_eval_enabled: false
+  ckpt_eval_path: ""
+  ckpt_resume_enabled: false
+  ckpt_resume_path: ""
+  ckpt_resume_epoch: null
+
+# RL Configs:s
+rl_config:
+  epsilon: 0             # ε-greedy exploration probability
+  tau: 0.62              # unknown detection threshold on similarity
+  alpha: 0.3             # Q-learning step size # set to 0 for baseline MemP
+  gamma: 0.0             # discount factor (single-step default)
+  q_init_pos: 0          # optimistic initialization
+  q_init_neg: 0          # negative q init
+  success_reward: 1.0
+  failure_reward: -1.0
+  topk: 3                  # candidate set size for value-aware selection
+  novelty_threshold: 0.85  # similarity to treat as non-novel (merge)
+  recency_boost: 0.0     # optional recency weight
+  reward_merge_gain: 0.1 # gain for attributing success to close memories
+  q_min_threshold: -10
+  weight_sim: 0.5        # weight for similarity in combined score
+  weight_q: 0.5          # weight for Q-value in combined score

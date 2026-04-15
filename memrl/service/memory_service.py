@@ -103,6 +103,16 @@ from ..providers.base import BaseLLM, BaseEmbedder
 from .value_driven import RLConfig, ValueAwareSelector, QValueUpdater, MemoryCurator
 
 
+def _resolve_vector_dimension(embedder_model_name: str | None) -> int:
+    """Map known embedder models to the vector dimension expected by Qdrant."""
+    model_name = str(embedder_model_name or "").strip().lower()
+    if "qwen" in model_name:
+        return 2560
+    if model_name in {"text-embedding-3-large", "openai/text-embedding-3-large"}:
+        return 3072
+    return 3072
+
+
 def _now_iso() -> str:
     return datetime.now().isoformat()
 
@@ -378,7 +388,7 @@ class MemoryService:
                 "backend": "qdrant",
                 "config": {
                     "collection_name": f"memp_{self.user_id}_{ts_str}",
-                    "vector_dimension": 3072,
+                    "vector_dimension": _resolve_vector_dimension(embedder_model_name),
                     "distance_metric": "cosine",
                     "path": qdrant_dir,
                 },

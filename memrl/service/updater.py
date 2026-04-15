@@ -95,7 +95,7 @@ def mem_add_with_retry(text_mem, item, max_retries=5, base_delay=2.0):
             return None
         except Exception as e:
             logger.warning(
-                f"[Retry {attempt}/{max_retries}] Textmem add 失败: {e}"
+                f"[Retry {attempt}/{max_retries}] Textmem add fail: {e}"
             )
             if attempt == max_retries:
                 logger.error("达到最大重试次数，仍未成功。")

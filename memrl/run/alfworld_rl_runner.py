@@ -12,9 +12,9 @@ import numpy as np
 import pandas as pd
 import json
 import random
+import statistics
 from datetime import datetime
 
-from torch.utils.tensorboard import SummaryWriter
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Optional
@@ -35,6 +35,14 @@ MAX_RETRIES = 4
 RETRY_DELAY = 2  
 
 logger = logging.getLogger(__name__)
+
+
+class NullSummaryWriter:
+    def add_scalar(self, *args, **kwargs):
+        return None
+
+    def close(self):
+        return None
 
 def load_config_from_path(config_path: str, params=None):
     assert os.path.exists(config_path), f"Invalid config file: {config_path}"
@@ -57,8 +65,9 @@ class AlfworldRunner(BaseRunner):
     environment instances upfront.
     """
     def __init__(self, agent: MempAgent, root: str, env_config: str, memory_service: MemoryService, exp_name: str,
-                 num_section: int, batch_size: int, max_steps: int, rl_config, ck_dir:str, retrieve_k: int=1, mode: str='train',
-                 valid_interval: int=2, test_interval: int=2, dataset_ratio: float=1.0, random_seed: int=42, bon: int=0,
+                 num_section: int, batch_size: int, max_steps: int, rl_config, ck_dir:str, retrieve_k: int=1,
+                 valid_interval: int=1, test_interval: int=1, dataset_ratio: float=1.0, random_seed: int=42, bon: int=0,
+                 shuffle_train_each_epoch: bool = False,
                  ckpt_resume_enabled: bool = False, ckpt_resume_path: Optional[str] = None, ckpt_resume_epoch: Optional[int] = None,
                  baseline_mode: Optional[str] = None, baseline_k: int = 10):
         self.agent = agent
@@ -70,19 +79,20 @@ class AlfworldRunner(BaseRunner):
         self.batch_size = batch_size
         self.max_steps = max_steps
         self.retrieve_k = retrieve_k
-        self.mode = mode
         self.env_config_path = env_config # Store path for AlfWorldEnv wrapper
         self.env_config = load_config_from_path(env_config) # Load config for AlfredTWEnv
         self.valid_interval = valid_interval
         self.test_interval = test_interval
         self.dataset_ratio = dataset_ratio
         self.bon = bon
+        self.shuffle_train_each_epoch = bool(shuffle_train_each_epoch)
         self.results_log = []
         self.ckpt_resume_enabled = ckpt_resume_enabled
         self.ckpt_resume_path = ckpt_resume_path
         self.ckpt_resume_epoch = ckpt_resume_epoch
         self.baseline_mode = (baseline_mode or "").strip().lower() or None
         self.baseline_k = max(1, int(baseline_k))
+        self.current_epoch_idx = 0
         
         self.rl_config: Optional[RLConfig] = rl_config
 
@@ -113,11 +123,8 @@ class AlfworldRunner(BaseRunner):
         env_controller = AlfredTWEnv(self.env_config, train_eval='eval_out_of_distribution')
         self.test_game_files = env_controller.game_files
 
-        # --- [TENSORBOARD] Initialize SummaryWriter ---
-        # Create a unique, timestamped directory for this experiment's logs
-        tb_log_dir = self.root / "logs" / "tensorboard" / f"exp_{self.exp_name}_{time.strftime('%Y%m%d-%H%M%S')}"
-        self.writer = SummaryWriter(log_dir=str(tb_log_dir))
-        logger.info(f"TensorBoard logs will be saved to: {tb_log_dir}")
+        self.writer = NullSummaryWriter()
+        logger.info("TensorBoard event writing is disabled for ALFWorld runs.")
         self.ck_dir = ck_dir
         if self.ckpt_resume_enabled and self.ckpt_resume_path:
             resume_root = Path(self.ckpt_resume_path)
@@ -187,6 +194,99 @@ class AlfworldRunner(BaseRunner):
         results_df.to_csv(results_csv_path, index=False)
         logger.info(f"\nDetailed results saved to: {results_csv_path}")
 
+    def _extract_memory_q_value(self, mem_id: str) -> Optional[float]:
+        q_cache = getattr(self.memory_service, "_q_cache", None) or {}
+        if mem_id in q_cache:
+            try:
+                return float(q_cache[mem_id])
+            except Exception:
+                return None
+
+        mem_obj = getattr(self.memory_service, "_mem_cache", {}).get(mem_id)
+        if mem_obj is None:
+            try:
+                with self.memory_service._db_gate:
+                    mem_obj = self.memory_service.mos.get(
+                        mem_cube_id=self.memory_service.default_cube_id,
+                        memory_id=mem_id,
+                        user_id=self.memory_service.user_id,
+                    )
+                if mem_obj is not None:
+                    self.memory_service._add_to_mem_cache(mem_id, mem_obj)
+            except Exception:
+                logger.debug("Failed to load memory %s for Q summary", mem_id, exc_info=True)
+                return None
+
+        if mem_obj is None:
+            return None
+
+        metadata = getattr(mem_obj, "metadata", {})
+        if hasattr(metadata, "model_extra"):
+            metadata = metadata.model_extra
+        if not isinstance(metadata, dict):
+            return None
+
+        q_val = metadata.get("q_value")
+        if q_val is None:
+            return None
+        try:
+            q_val = float(q_val)
+        except Exception:
+            return None
+
+        try:
+            self.memory_service._q_cache[mem_id] = q_val
+        except Exception:
+            pass
+        return q_val
+
+    def _log_q_distribution_summary(self, epoch_idx: int) -> None:
+        dict_memory = getattr(self.memory_service, "dict_memory", {}) or {}
+        mem_ids = sorted({str(mem_id) for mem_ids in dict_memory.values() for mem_id in (mem_ids or []) if mem_id})
+        total_memories = len(mem_ids)
+        if total_memories == 0:
+            logger.info("q_distribution_at_epoch_%d: total_memory_count=0, nonzero_q_count=0, nonzero_q_ratio=0.0000, positive_q_count=0, positive_q_ratio=0.0000, zero_q_count=0, zero_q_ratio=0.0000, negative_q_count=0, negative_q_ratio=0.0000, mean_q=nan, median_q=nan, min_q=nan, max_q=nan", epoch_idx)
+            return
+
+        q_values = []
+        missing_q_count = 0
+        for mem_id in mem_ids:
+            q_val = self._extract_memory_q_value(mem_id)
+            if q_val is None:
+                missing_q_count += 1
+                continue
+            q_values.append(float(q_val))
+
+        effective_total = len(q_values)
+        if effective_total == 0:
+            logger.info("q_distribution_at_epoch_%d: total_memory_count=%d, memories_with_q=0, missing_q_count=%d, nonzero_q_count=0, nonzero_q_ratio=0.0000, positive_q_count=0, positive_q_ratio=0.0000, zero_q_count=0, zero_q_ratio=0.0000, negative_q_count=0, negative_q_ratio=0.0000, mean_q=nan, median_q=nan, min_q=nan, max_q=nan", epoch_idx, total_memories, missing_q_count)
+            return
+
+        positive_q_count = sum(1 for q in q_values if q > 0.0)
+        zero_q_count = sum(1 for q in q_values if q == 0.0)
+        negative_q_count = sum(1 for q in q_values if q < 0.0)
+        nonzero_q_count = positive_q_count + negative_q_count
+
+        logger.info(
+            "q_distribution_at_epoch_%d: total_memory_count=%d, memories_with_q=%d, missing_q_count=%d, nonzero_q_count=%d, nonzero_q_ratio=%.4f, positive_q_count=%d, positive_q_ratio=%.4f, zero_q_count=%d, zero_q_ratio=%.4f, negative_q_count=%d, negative_q_ratio=%.4f, mean_q=%.6f, median_q=%.6f, min_q=%.6f, max_q=%.6f",
+            epoch_idx,
+            total_memories,
+            effective_total,
+            missing_q_count,
+            nonzero_q_count,
+            (nonzero_q_count / effective_total),
+            positive_q_count,
+            (positive_q_count / effective_total),
+            zero_q_count,
+            (zero_q_count / effective_total),
+            negative_q_count,
+            (negative_q_count / effective_total),
+            statistics.fmean(q_values),
+            statistics.median(q_values),
+            min(q_values),
+            max(q_values),
+        )
+
     def envs_spilt(
         self, 
         game_files, 
@@ -203,11 +303,12 @@ class AlfworldRunner(BaseRunner):
             raise ValueError(f"No game files found for task_type '{task_type}'. Check your config paths.")
 
         # Each section uses the whole dataset; num_section controls number of passes.
-        section_splits = [game_files for _ in range(self.num_section)]
-
         game_list_by_section = []
-        for i, section_games in enumerate(section_splits):
-            section_games = list(section_games)
+        for i in range(self.num_section):
+            section_games = list(game_files)
+            if task_type == 'train' and self.shuffle_train_each_epoch:
+                random.shuffle(section_games)
+                logger.info("Shuffled %d train games for epoch %d.", len(section_games), i + 1)
             
             num_mini_batches = int(np.ceil(len(section_games) / self.batch_size))
             mini_batch_splits = []
@@ -476,7 +577,11 @@ class AlfworldRunner(BaseRunner):
                                 return self.agent.act(
                                     observation=current_observations[slot_idx],
                                     history_messages=messages_per_slot[slot_idx],
-                                    first_step=(step == 0)
+                                    first_step=(step == 0),
+                                    epoch_idx=self.current_epoch_idx,
+                                    game_id=current_gamefiles[slot_idx],
+                                    slot_idx=slot_idx,
+                                    step_idx=step,
                                 )
                             except Exception as e:
                                 logger.warning(
@@ -485,8 +590,13 @@ class AlfworldRunner(BaseRunner):
                                 if attempt < MAX_RETRIES:
                                     time.sleep(RETRY_DELAY)
                                 else:
-                                    logger.error(f"[Sampling Abort] Slot {slot_idx} all retries failed.")
-                                    return "inventory"
+                                    logger.error(
+                                        f"[Sampling Abort] Slot {slot_idx} all retries failed. Aborting run.",
+                                        exc_info=True,
+                                    )
+                                    raise RuntimeError(
+                                        f"Sampling failed for slot {slot_idx} after {MAX_RETRIES} attempts."
+                                    ) from e
                     future_to_slot[executor.submit(submit_with_retry)] = i
 
                 for future in as_completed(future_to_slot):
@@ -494,8 +604,11 @@ class AlfworldRunner(BaseRunner):
                     try:
                         actions_dict[slot_idx] = future.result()
                     except Exception as e:
-                        logger.error(f"[Sampling Fatal] Slot {slot_idx} raised unhandled exception: {e}")
-                        actions_dict[slot_idx] = "inventory"
+                        logger.error(
+                            f"[Sampling Fatal] Slot {slot_idx} raised unhandled exception. Aborting run: {e}",
+                            exc_info=True,
+                        )
+                        raise RuntimeError(f"Fatal sampling error in slot {slot_idx}") from e
 
             steps_per_slot += np.ones(len(steps_per_slot))
             actions = ["look"] * current_bs
@@ -834,7 +947,11 @@ class AlfworldRunner(BaseRunner):
                                 return self.agent.act(
                                     observation=current_observations[slot_idx],
                                     history_messages=messages_per_slot[slot_idx],
-                                    first_step=(step == 0)
+                                    first_step=(step == 0),
+                                    epoch_idx=self.current_epoch_idx,
+                                    game_id=current_gamefiles[slot_idx],
+                                    slot_idx=slot_idx,
+                                    step_idx=step,
                                 )
                             except Exception as e:
                                 logger.warning(
@@ -843,8 +960,13 @@ class AlfworldRunner(BaseRunner):
                                 if attempt < MAX_RETRIES:
                                     time.sleep(RETRY_DELAY)
                                 else:
-                                    logger.error(f"[Sampling Abort] Slot {slot_idx} all retries failed.")
-                                    return "inventory"
+                                    logger.error(
+                                        f"[Sampling Abort] Slot {slot_idx} all retries failed. Aborting run.",
+                                        exc_info=True,
+                                    )
+                                    raise RuntimeError(
+                                        f"Sampling failed for slot {slot_idx} after {MAX_RETRIES} attempts."
+                                    ) from e
 
                     future_to_slot[executor.submit(submit_with_retry)] = i
 
@@ -853,8 +975,11 @@ class AlfworldRunner(BaseRunner):
                     try:
                         actions_dict[slot_idx] = future.result()
                     except Exception as e:
-                        logger.error(f"[Sampling Fatal] Slot {slot_idx} raised unhandled exception: {e}")
-                        actions_dict[slot_idx] = "inventory"
+                        logger.error(
+                            f"[Sampling Fatal] Slot {slot_idx} raised unhandled exception. Aborting run: {e}",
+                            exc_info=True,
+                        )
+                        raise RuntimeError(f"Fatal sampling error in slot {slot_idx}") from e
 
             steps_per_slot += np.ones(len(steps_per_slot))
             
@@ -1007,15 +1132,19 @@ class AlfworldRunner(BaseRunner):
                 self._run_reflection_baseline()
             self.writer.close()
             return
-        if self.mode != 'test': 
-            
-            logger.info("eval spilt")
-            if not skip_initial_eval:
-                self._evaluate(
-                        game_files=self.valid_game_files,
-                        eval_type="eval_in_distribution", 
-                        after_section=0
-                    )    
+        logger.info("Running ALFWorld evaluations on both seen and unseen validation splits.")
+        if not skip_initial_eval:
+            self.current_epoch_idx = 0
+            self._evaluate(
+                game_files=self.valid_game_files,
+                eval_type="eval_in_distribution",
+                after_section=0,
+            )
+            self._evaluate(
+                game_files=self.test_game_files,
+                eval_type="eval_out_of_distribution",
+                after_section=0,
+            )
 
     # --- Loop: Iterate through Sections ---
         # 1. Prepare data splits
@@ -1026,14 +1155,37 @@ class AlfworldRunner(BaseRunner):
             if section_num < start_section:
                 logger.info("Skipping section %d due to resume.", section_num)
                 continue
+            self.current_epoch_idx = section_num
 
             logger.info("\n" + "#"*20 + f" STARTING SECTION {section_num}/{self.num_section}" + "#"*20)
+            total_section_games = sum(len(mini_batch) for mini_batch in section_data)
+            total_section_batches = len(section_data)
+            logger.info(
+                "Epoch %d/%d started: %d train games across %d mini-batches.",
+                section_num,
+                self.num_section,
+                total_section_games,
+                total_section_batches,
+            )
 
             section_trajectories = []
+            section_games_processed = 0
 
             # --- Inner Loop: Iterate through mini-batches (environments) ---
             for i, mini_batch_games in tqdm(enumerate(section_data)):
-                logger.info(f"Processing mini-batch {i+1}/{len(section_data)} in section {section_num}...")
+                batch_idx = i + 1
+                section_games_processed += len(mini_batch_games)
+                logger.info(
+                    "Epoch %d/%d, mini-batch %d/%d: %d games in batch, %d/%d train games scheduled (%.2f%%).",
+                    section_num,
+                    self.num_section,
+                    batch_idx,
+                    total_section_batches,
+                    len(mini_batch_games),
+                    section_games_processed,
+                    total_section_games,
+                    (section_games_processed / total_section_games * 100.0) if total_section_games else 0.0,
+                )
 
                 # Collect trajectories
                 mini_batch_env = None
@@ -1095,7 +1247,12 @@ class AlfworldRunner(BaseRunner):
 
                 logger.info(f"Mini-batch {i+1} memory update complete.")
 
-            logger.info(f"Section {section_num} complete. Total {len(section_trajectories)} trajectories collected.")
+            logger.info(
+                "Epoch %d/%d complete. Total trajectories collected: %d.",
+                section_num,
+                self.num_section,
+                len(section_trajectories),
+            )
 
             
             self._update_cum_success(section_trajectories)
@@ -1139,21 +1296,23 @@ class AlfworldRunner(BaseRunner):
                 self.writer.add_scalar("Train/Section_Avg_Steps", section_avg_steps, section_num)
                 logger.info(f"Section {section_num} Training Stats: Success Rate={section_success_rate:.2%}, Avg Steps={section_avg_steps:.2f}")
 
-            if self.mode != 'test':
-                if self.valid_interval > 0 and section_num % self.valid_interval == 0:
-                    self._evaluate(
-                        game_files=self.valid_game_files,
-                        eval_type="eval_in_distribution", 
-                        after_section=section_num
-                    )
+            self._log_q_distribution_summary(section_num)
 
-                # # Check if it's time to run evaluation on the test set
-                # if self.test_interval > 0 and section_num % self.test_interval == 0:
-                #     self._evaluate(
-                #         game_files=self.test_game_files,
-                #         eval_type="eval_out_of_distribution", 
-                #         after_section=section_num
-                #     )
+            if self.valid_interval > 0 and section_num % self.valid_interval == 0:
+                self.current_epoch_idx = section_num
+                self._evaluate(
+                    game_files=self.valid_game_files,
+                    eval_type="eval_in_distribution",
+                    after_section=section_num,
+                )
+
+            if self.test_interval > 0 and section_num % self.test_interval == 0:
+                self.current_epoch_idx = section_num
+                self._evaluate(
+                    game_files=self.test_game_files,
+                    eval_type="eval_out_of_distribution",
+                    after_section=section_num,
+                )
 
             # Final analysis at the end of all sections
         self._analyze_and_report_results()
