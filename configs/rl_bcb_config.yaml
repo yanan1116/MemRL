@@ -44,6 +44,9 @@ memory:
   confidence_threshold: 0.0
   memory_confidence: 100.0
   add_similarity_threshold: 0.9
+  # Token budget (character-level) for injected memory context.
+  # 0 means unlimited – all retrieved memories are included without truncation.
+  memory_budget_tokens: 0
 
   # MemOS config (NOTE: `run/run_bcb.py` writes a temporary mos_config.json at runtime;
   # this field is kept for schema completeness/compatibility.)
