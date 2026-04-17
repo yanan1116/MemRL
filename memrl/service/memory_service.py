@@ -117,6 +117,36 @@ def _now_iso() -> str:
     return datetime.now().isoformat()
 
 
+def _coerce_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return float(default)
+
+
+def _coerce_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return int(default)
+
+
+def _classify_memory_bucket(
+    q_value: float,
+    visit_count: int,
+    *,
+    eps: float,
+    uncertain_visit_threshold: int,
+) -> str:
+    if q_value > eps:
+        return "positive"
+    if q_value < -eps:
+        return "negative"
+    if visit_count <= uncertain_visit_threshold:
+        return "uncertain"
+    return "uninformative"
+
+
 def get_embedding_with_retry(embed_func, text, max_retries=5, base_delay=2.0):
     """
     Retry for embedding queries
@@ -663,13 +693,26 @@ class MemoryService:
             ):
                 # User-selected behavior: unknown success defaults to q_init_pos.
                 is_success = True if success is None else bool(success)
+                initial_q = (
+                    float(self.rl_config.q_init_pos)
+                    if is_success
+                    else float(self.rl_config.q_init_neg)
+                )
                 base_meta |= {
-                    "q_value": (
-                        float(self.rl_config.q_init_pos)
-                        if is_success
-                        else float(self.rl_config.q_init_neg)
+                    "q_value": initial_q,
+                    "initial_q_value": initial_q,
+                    "initial_q_bucket": _classify_memory_bucket(
+                        initial_q,
+                        0,
+                        eps=float(getattr(self.rl_config, "q_epsilon", 0.05)),
+                        uncertain_visit_threshold=int(
+                            getattr(self.rl_config, "uncertain_visit_threshold", 2)
+                        ),
                     ),
                     "q_visits": 0,
+                    "visit_count": 0,
+                    "success_count": 1 if success is True else 0,
+                    "failure_count": 1 if success is False else 0,
                     "q_updated_at": datetime.now().isoformat(),
                     "last_used_at": datetime.now().isoformat(),
                     "reward_ma": 0.0,
@@ -1095,13 +1138,26 @@ class MemoryService:
         ):
             # User-selected behavior: unknown success defaults to q_init_pos.
             is_success = True if success is None else bool(success)
+            initial_q = (
+                float(self.rl_config.q_init_pos)
+                if is_success
+                else float(self.rl_config.q_init_neg)
+            )
             base_meta |= {
-                "q_value": (
-                    float(self.rl_config.q_init_pos)
-                    if is_success
-                    else float(self.rl_config.q_init_neg)
+                "q_value": initial_q,
+                "initial_q_value": initial_q,
+                "initial_q_bucket": _classify_memory_bucket(
+                    initial_q,
+                    0,
+                    eps=float(getattr(self.rl_config, "q_epsilon", 0.05)),
+                    uncertain_visit_threshold=int(
+                        getattr(self.rl_config, "uncertain_visit_threshold", 2)
+                    ),
                 ),
                 "q_visits": 0,
+                "visit_count": 0,
+                "success_count": 1 if success is True else 0,
+                "failure_count": 1 if success is False else 0,
                 "q_updated_at": datetime.now().isoformat(),
                 "last_used_at": datetime.now().isoformat(),
                 "reward_ma": 0.0,
@@ -1297,75 +1353,103 @@ class MemoryService:
             if not queries:
                 return {"actions": [], "selected": [], "candidates": [], "simmax": 0.0}
 
-            query_vec = get_embedding_with_retry(embed, [task_description])[0]
-            query_norm = math.sqrt(sum(x * x for x in query_vec)) or 1e-8
+            retrieve_strategy = getattr(
+                self.strategy_config, "retrieve", RetrieveStrategy.QUERY
+            )
+            is_random_full = retrieve_strategy in (
+                RetrieveStrategy.RANDOM,
+                RetrieveStrategy.RANDOM_FULL,
+            )
+            is_random_partial = retrieve_strategy == RetrieveStrategy.RANDOM_PARTIAL
 
-            query_embeddings = getattr(self, "query_embeddings", {})
-            missing_queries = [q for q in queries if q not in query_embeddings]
+            def _load_candidate_pool(
+                query_pairs: List[tuple[str, float]]
+            ) -> List[Dict[str, Any]]:
+                loaded_candidates = []
+                for q, sim in query_pairs:
+                    mem_ids = self.dict_memory.get(q, [])
+                    for mid in mem_ids:
+                        try:
+                            mem_obj = self._mem_cache.get(mid)
+                            if mem_obj is None:
+                                with self._db_gate:
+                                    mem_obj = self.mos.get(
+                                        mem_cube_id=self.default_cube_id,
+                                        memory_id=mid,
+                                        user_id=self.user_id,
+                                    )
+                                if mem_obj is not None:
+                                    self._add_to_mem_cache(mid, mem_obj)
 
-            if missing_queries:
-                logger.info(
-                    f"Missing embeddings for {len(missing_queries)} queries, fetching..."
-                )
-                new_vecs = get_embedding_with_retry(embed, missing_queries)
-                for q, v in zip(missing_queries, new_vecs):
-                    query_embeddings[q] = v
-                self.query_embeddings.update(query_embeddings)
-
-            # -------- Compute similarity for all queries --------
-            sim_list = []
-            for q in queries:
-                qv = query_embeddings[q]
-                q_norm = math.sqrt(sum(x * x for x in qv)) or 1e-8
-                sim = sum(a * b for a, b in zip(query_vec, qv)) / (query_norm * q_norm)
-                if sim >= threshold:
-                    sim_list.append((q, sim))
-            sim_list.sort(key=lambda x: x[1], reverse=True)
-
-            if k is not None:
-                sim_list = sim_list[:k]
-            if not sim_list:
-                return {"actions": [], "selected": [], "candidates": [], "simmax": 0.0}
-
-            # -------- Fetch memory objects, build candidate list --------
-            candidates = []
-            for q, sim in sim_list:
-                mem_ids = self.dict_memory.get(q, [])
-                for mid in mem_ids:
-                    try:
-                        mem_obj = self._mem_cache.get(mid)
-                        if mem_obj is None:
-                            with self._db_gate:
-                                mem_obj = self.mos.get(
-                                    mem_cube_id=self.default_cube_id,
-                                    memory_id=mid,
-                                    user_id=self.user_id,
-                                )
                             if mem_obj is not None:
-                                self._add_to_mem_cache(mid, mem_obj)
-
-                        if mem_obj is not None:
-                            md = getattr(mem_obj, "metadata", {})
-                            content = None
-                            try:
-                                if hasattr(md, "model_extra"):
-                                    content = md.model_extra.get("full_content")
-                                elif isinstance(md, dict):
-                                    content = md.get("full_content")
-                            except Exception:
+                                md = getattr(mem_obj, "metadata", {})
                                 content = None
+                                try:
+                                    if hasattr(md, "model_extra"):
+                                        content = md.model_extra.get("full_content")
+                                    elif isinstance(md, dict):
+                                        content = md.get("full_content")
+                                except Exception:
+                                    content = None
 
-                            candidates.append(
-                                {
-                                    "memory_id": mid,
-                                    "content": content,
-                                    "similarity": float(sim),
-                                    "metadata": md,
-                                    "memory_item": mem_obj,
-                                }
-                            )
-                    except Exception:
-                        logger.info(f"Failed to load memory {mid}", exc_info=True)
+                                loaded_candidates.append(
+                                    {
+                                        "memory_id": mid,
+                                        "content": content,
+                                        "similarity": float(sim),
+                                        "metadata": md,
+                                        "memory_item": mem_obj,
+                                    }
+                                )
+                        except Exception:
+                            logger.info(f"Failed to load memory {mid}", exc_info=True)
+                return loaded_candidates
+
+            def _random_pick(
+                pool: List[Dict[str, Any]], sample_size: int
+            ) -> List[Dict[str, Any]]:
+                if sample_size <= 0 or not pool:
+                    return []
+                if len(pool) <= sample_size:
+                    return list(pool)
+                return random.sample(pool, sample_size)
+
+            sim_list = []
+            if is_random_full:
+                all_query_pairs = [(q, 0.0) for q in queries]
+                candidates = _load_candidate_pool(all_query_pairs)
+            else:
+                query_vec = get_embedding_with_retry(embed, [task_description])[0]
+                query_norm = math.sqrt(sum(x * x for x in query_vec)) or 1e-8
+
+                query_embeddings = getattr(self, "query_embeddings", {})
+                missing_queries = [q for q in queries if q not in query_embeddings]
+
+                if missing_queries:
+                    logger.info(
+                        f"Missing embeddings for {len(missing_queries)} queries, fetching..."
+                    )
+                    new_vecs = get_embedding_with_retry(embed, missing_queries)
+                    for q, v in zip(missing_queries, new_vecs):
+                        query_embeddings[q] = v
+                    self.query_embeddings.update(query_embeddings)
+
+                # -------- Compute similarity for all queries --------
+                for q in queries:
+                    qv = query_embeddings[q]
+                    q_norm = math.sqrt(sum(x * x for x in qv)) or 1e-8
+                    sim = sum(a * b for a, b in zip(query_vec, qv)) / (query_norm * q_norm)
+                    if sim >= threshold:
+                        sim_list.append((q, sim))
+                sim_list.sort(key=lambda x: x[1], reverse=True)
+
+                if k is not None:
+                    sim_list = sim_list[:k]
+                if not sim_list:
+                    return {"actions": [], "selected": [], "candidates": [], "simmax": 0.0}
+
+                # -------- Fetch memory objects, build candidate list --------
+                candidates = _load_candidate_pool(sim_list)
 
             if not candidates:
                 return {"actions": [], "selected": [], "candidates": [], "simmax": 0.0}
@@ -1373,7 +1457,14 @@ class MemoryService:
             # -------- Compute Q value for each candidate --------
             enriched = []
             simmax = 0.0
-            q_values = []
+            ranking_values = []
+            q_eps = float(getattr(self.rl_config, "q_epsilon", 0.05))
+            uncertain_visit_threshold = int(
+                getattr(self.rl_config, "uncertain_visit_threshold", 2)
+            )
+            use_thompson_sampling = bool(
+                getattr(self.rl_config, "use_thompson_sampling", False)
+            )
             for c in candidates:
                 sim = c["similarity"]
                 simmax = max(simmax, sim)
@@ -1425,10 +1516,36 @@ class MemoryService:
                     except Exception:
                         pass
 
+                visit_count = _coerce_int(md.get("visit_count", md.get("q_visits", 0)))
+                success_count = _coerce_int(md.get("success_count", 0))
+                failure_count = _coerce_int(md.get("failure_count", 0))
+                memory_bucket = _classify_memory_bucket(
+                    q,
+                    visit_count,
+                    eps=q_eps,
+                    uncertain_visit_threshold=uncertain_visit_threshold,
+                )
+
                 c_local = dict(c)
                 c_local["q_estimate"] = q
                 c_local["task_id"] = (str(task_id) if task_id is not None else None)
-                q_values.append(q)
+                c_local["visit_count"] = visit_count
+                c_local["success_count"] = success_count
+                c_local["failure_count"] = failure_count
+                c_local["memory_bucket"] = memory_bucket
+                c_local["raw_q_value"] = q
+
+                if use_thompson_sampling:
+                    sampled_theta = random.betavariate(
+                        1.0 + success_count,
+                        1.0 + failure_count,
+                    )
+                    c_local["thompson_theta"] = sampled_theta
+                    c_local["q_estimate"] = sampled_theta
+                else:
+                    c_local["q_estimate"] = q
+
+                ranking_values.append(c_local["q_estimate"])
                 enriched.append(c_local)
 
             # -------- Optional Q threshold --------
@@ -1450,9 +1567,13 @@ class MemoryService:
             w_q = self.weight_q
 
             # derive q normalization stats from current candidates
-            if q_values:
-                mean_q = float(statistics.fmean(q_values))
-                std_q = float(statistics.pstdev(q_values)) if len(q_values) > 1 else 1.0
+            if ranking_values:
+                mean_q = float(statistics.fmean(ranking_values))
+                std_q = (
+                    float(statistics.pstdev(ranking_values))
+                    if len(ranking_values) > 1
+                    else 1.0
+                )
             else:
                 mean_q, std_q = 0.0, 1.0
 
@@ -1474,9 +1595,53 @@ class MemoryService:
             # -------- Sort by hybrid score --------
             enriched_sorted = sorted(enriched, key=lambda x: x["score"], reverse=True)
 
-            # -------- epsilon-greedy sampling --------
+            # -------- Selection --------
             topk = min(self.rl_config.topk, len(enriched_sorted))
-            if not getattr(self, "dedup_by_task_id", False):
+            if is_random_full:
+                selected = _random_pick(enriched_sorted, topk)
+            elif is_random_partial:
+                selected = _random_pick(enriched_sorted, topk)
+            elif getattr(self.rl_config, "tri_channel_enabled", False):
+                k_pos = max(0, int(getattr(self.rl_config, "k_pos", 0)))
+                k_neg = max(0, int(getattr(self.rl_config, "k_neg", 0)))
+                k_zero = max(0, int(getattr(self.rl_config, "k_zero", 0)))
+
+                positive_candidates = [
+                    c for c in enriched_sorted if c.get("memory_bucket") == "positive"
+                ]
+                negative_candidates = [
+                    c for c in enriched_sorted if c.get("memory_bucket") == "negative"
+                ]
+                uncertain_candidates = sorted(
+                    (
+                        c
+                        for c in enriched_sorted
+                        if c.get("memory_bucket") == "uncertain"
+                        and _coerce_int(c.get("visit_count", 0))
+                        <= uncertain_visit_threshold
+                    ),
+                    key=lambda x: (x["similarity"], x["score"]),
+                    reverse=True,
+                )
+
+                selected = []
+                seen_memory_ids: set[str] = set()
+
+                for group, limit in (
+                    (positive_candidates, k_pos),
+                    (negative_candidates, k_neg),
+                    (uncertain_candidates, k_zero),
+                ):
+                    for cand in group[:limit]:
+                        mem_id = str(cand.get("memory_id"))
+                        if mem_id in seen_memory_ids:
+                            continue
+                        seen_memory_ids.add(mem_id)
+                        selected.append(cand)
+
+                if not selected:
+                    selected = enriched_sorted[:topk]
+            elif not getattr(self, "dedup_by_task_id", False):
                 if random.random() < self.rl_config.epsilon:
                     selected = random.sample(enriched_sorted, topk)
                 else:
@@ -1604,7 +1769,22 @@ class MemoryService:
                     except Exception:
                         meta["q_value"] = default_q
 
+                meta.setdefault("initial_q_value", meta["q_value"])
+                meta.setdefault(
+                    "initial_q_bucket",
+                    _classify_memory_bucket(
+                        _coerce_float(meta.get("initial_q_value", meta["q_value"])),
+                        0,
+                        eps=float(getattr(rl_cfg, "q_epsilon", 0.05)),
+                        uncertain_visit_threshold=int(
+                            getattr(rl_cfg, "uncertain_visit_threshold", 2)
+                        ),
+                    ),
+                )
                 meta.setdefault("q_visits", 0)
+                meta.setdefault("visit_count", meta.get("q_visits", 0))
+                meta.setdefault("success_count", 1 if bool(succ) else 0)
+                meta.setdefault("failure_count", 0 if bool(succ) else 1)
                 meta.setdefault("q_updated_at", datetime.now().isoformat())
                 meta.setdefault("last_used_at", datetime.now().isoformat())
                 meta.setdefault("reward_ma", 0.0)

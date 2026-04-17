@@ -159,6 +159,7 @@ class MempAgent(BaseAgent):
         if retrieved_memories:
             successful_mems = retrieved_memories.get('successed', [])
             failed_mems = retrieved_memories.get('failed', [])
+            uncertain_mems = retrieved_memories.get('uncertain', [])
 
             successful_mems_formatted = [
                 self._format_retrieved_memory(mem['content']) for mem in successful_mems
@@ -168,9 +169,14 @@ class MempAgent(BaseAgent):
                 self._format_retrieved_memory(mem['content']) for mem in failed_mems
             ] if failed_mems else []
 
+            uncertain_mems_formatted = [
+                self._format_retrieved_memory(mem['content']) for mem in uncertain_mems
+            ] if uncertain_mems else []
+
             memory_parts = [
                 "In addition to the example, you have the following memories from your own past experiences. "
-                "Use them to help you if they are relevant:"
+                "Use them to help you if they are relevant:",
+                "Treat successful memories as strategies to follow, failed memories as warnings about what to avoid, and uncertain memories as tentative hints that may help but are not yet validated."
             ]
 
             if successful_mems_formatted:
@@ -185,7 +191,13 @@ class MempAgent(BaseAgent):
                     "\n".join(failed_mems_formatted)
                 )
 
-            if successful_mems_formatted or failed_mems_formatted:
+            if uncertain_mems_formatted:
+                memory_parts.append(
+                    "--- UNCERTAIN MEMORIES (Related but not yet validated; use cautiously) ---\n" +
+                    "\n".join(uncertain_mems_formatted)
+                )
+
+            if successful_mems_formatted or failed_mems_formatted or uncertain_mems_formatted:
                 memory_context = "\n\n".join(memory_parts)
                 messages.append({"role": "system", "content": memory_context})
 

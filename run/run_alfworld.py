@@ -136,9 +136,7 @@ def main():
         logger.info("resolved config ===>\n%s", json.dumps(cfg.model_dump(), indent=2, ensure_ascii=False))
         if args.overrides:
             logger.info("applied overrides ===>\n%s", json.dumps(args.overrides, indent=2, ensure_ascii=False))
-        
-        os._exit(1)
-        
+
         llm_provider = OpenAILLM(
             api_key=cfg.llm.api_key,
             base_url=cfg.llm.base_url,

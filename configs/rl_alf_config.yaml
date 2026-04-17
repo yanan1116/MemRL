@@ -11,7 +11,7 @@ llm:
 embedding:
   provider: "openai"
   api_key: "yyy"
-  base_url: "http://10.225.68.29:1707/v1"
+  base_url: "http://10.225.68.36:1707/v1"
   model: "Qwen/Qwen3-Embedding-4B"
   max_text_len: 4096
 

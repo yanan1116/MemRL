@@ -65,7 +65,7 @@ class MemoryConfig(BaseModel):
     build_strategy: str = Field(default="proceduralization", 
                                description="Build strategy: trajectory, script, proceduralization")
     retrieve_strategy: str = Field(default="query",
-                                  description="Retrieve strategy: random, query, avefact") 
+                                  description="Retrieve strategy: random, random_full, random_partial, query, avefact") 
     update_strategy: str = Field(default="adjustment",
                                 description="Update strategy: vanilla, validation, adjustment")
     
@@ -222,6 +222,13 @@ class RLConfig(BaseModel):
     q_min_threshold: float = Field(default=-0.8, description="Threshold for q min")
     weight_sim: float = Field(default=0.5, description="Weight for similarity in combined score")
     weight_q: float = Field(default=0.5, description="Weight for Q-value in combined score")
+    q_epsilon: float = Field(default=0.05, ge=0.0, description="Small band around zero used to define uncertain memories")
+    uncertain_visit_threshold: int = Field(default=2, ge=0, description="Maximum visit_count for zero-Q memories to be considered exploratory")
+    tri_channel_enabled: bool = Field(default=False, description="Enable tri-channel retrieval with separate positive/negative/uncertain memory channels")
+    k_pos: int = Field(default=3, ge=0, description="Number of positive memories to inject when tri-channel retrieval is enabled")
+    k_neg: int = Field(default=1, ge=0, description="Number of negative memories to inject when tri-channel retrieval is enabled")
+    k_zero: int = Field(default=1, ge=0, description="Number of uncertain zero-Q memories to inject when tri-channel retrieval is enabled")
+    use_thompson_sampling: bool = Field(default=False, description="Use Thompson-sampled success likelihood instead of deterministic Q for stage-2 ranking")
 
 class MempConfig(BaseModel):
     """Main configuration class for the Memp system."""

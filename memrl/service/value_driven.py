@@ -40,6 +40,13 @@ class RLConfig:
     reward_merge_gain: float = 0.1 # gain for attributing success to close memories
     weight_sim: float = 0.5        # weight for similarity in combined score
     weight_q: float = 0.5          # weight for Q-value in combined score
+    q_epsilon: float = 0.05        # small band around zero used to define "uncertain" memories
+    uncertain_visit_threshold: int = 2  # low-visit zero-Q memories are exploratory
+    tri_channel_enabled: bool = False   # retrieve positive / negative / uncertain channels separately
+    k_pos: int = 3                 # positive channel size when tri-channel retrieval is enabled
+    k_neg: int = 1                 # negative channel size when tri-channel retrieval is enabled
+    k_zero: int = 1                # uncertain zero-Q channel size when tri-channel retrieval is enabled
+    use_thompson_sampling: bool = False  # sample memory utility from Beta posterior at retrieval time
 
 
 # ----------------- Utilities -----------------
@@ -202,6 +209,13 @@ class QValueUpdater:
                 pass
 
         visits = int(old_meta.get("q_visits", 0)) + 1
+        visit_count = int(old_meta.get("visit_count", old_meta.get("q_visits", 0))) + 1
+        success_count = int(old_meta.get("success_count", 0)) + (
+            1 if float(reward) > 0.0 else 0
+        )
+        failure_count = int(old_meta.get("failure_count", 0)) + (
+            1 if float(reward) < 0.0 else 0
+        )
         # simple EMA for reward
         old_ma = float(old_meta.get("reward_ma", 0.0))
         reward_ma = (1.0 - self.cfg.alpha) * old_ma + self.cfg.alpha * float(reward)
@@ -209,6 +223,9 @@ class QValueUpdater:
         new_meta = old_meta | {
             "q_value": float(new_q),
             "q_visits": visits,
+            "visit_count": visit_count,
+            "success_count": success_count,
+            "failure_count": failure_count,
             "last_reward": float(reward),
             "reward_ma": reward_ma,
             "q_updated_at": _now_iso(),

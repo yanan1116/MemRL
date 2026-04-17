@@ -36,6 +36,12 @@ class RetrieveStrategy(Enum):
     
     RANDOM = "random"
     """Randomly sample memories (baseline for comparison)."""
+
+    RANDOM_FULL = "random_full"
+    """Randomly sample memories from the full memory bank with no similarity first stage."""
+
+    RANDOM_PARTIAL = "random_partial"
+    """Run similarity retrieval first, then randomly sample memories from that candidate pool."""
     
     QUERY = "query"
     """Use original task description vector as retrieval key."""
@@ -115,7 +121,7 @@ class StrategyConfiguration:
         """
         return cls(
             build=BuildStrategy.TRAJECTORY,
-            retrieve=RetrieveStrategy.RANDOM,
+            retrieve=RetrieveStrategy.RANDOM_FULL,
             update=UpdateStrategy.VANILLA
         )
     
