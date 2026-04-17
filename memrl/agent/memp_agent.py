@@ -22,6 +22,8 @@ class MempAgent(BaseAgent):
         # The agent is now independent of the memory service.
         self.llm = llm_provider
         self.few_shot_examples = few_shot_examples
+        model_name = str(getattr(llm_provider, "model", "") or "").lower()
+        self.system_prompt = prompts.QWEN_SYSTEM_PROMPT if "qwen" in model_name else prompts.SYSTEM_PROMPT
         self.prefixes = {
             'pick_and_place': 'put',
             'pick_clean_then_place': 'clean',
@@ -113,18 +115,27 @@ class MempAgent(BaseAgent):
         (SCRIPT and the core Thought/Action/Observation sequence), removing
         redundant headers, system prompts, and old task descriptions.
         """
-        raw_content = (raw_content or "").strip()
-        if not raw_content:
-            return ""
+        try:
+            header = ""
+            trajectory_str = raw_content
+            # 1. Split the content into the header (Task, Script) and the trajectory part
+            if 'TRAJECTORY' in raw_content:
+                header, trajectory_str = raw_content.split('\n\nTRAJECTORY:\n', 1)
+            elif 'Failed approach' in raw_content:
+                header, trajectory_str = raw_content.split('\n\nFailed approach:\n', 1) 
+            else:
+                # Raw trajectory memories are stored as "Task: ...\n\n[...]" without
+                # the proceduralization markers above.
+                trajectory_start = raw_content.find('[')
+                if trajectory_start != -1:
+                    header = raw_content[:trajectory_start].strip()
+                    trajectory_str = raw_content[trajectory_start:].strip()
 
-        header, body, body_type = self._split_retrieved_memory_content(raw_content)
-        header = header.strip()
-        body = body.strip()
-        clean_parts = []
-
-        if 'SCRIPT:' in header:
-            script_part = header.split('SCRIPT:', 1)[1].strip()
-            if script_part:
+            clean_parts = []
+            
+            # 2. Extract the high-level SCRIPT or reflection if it exists
+            if 'SCRIPT:' in header:
+                script_part = header.split('SCRIPT:')[1].strip()
                 clean_parts.append(f"Archived Script:\n{script_part}")
         if 'What went wrong:' in header:
             reflection_part = header.split('What went wrong:', 1)[1].strip()
@@ -167,7 +178,7 @@ class MempAgent(BaseAgent):
         Builds the message list in a conversational ReAct style.
         """
         # 1. Start with the system prompt
-        messages = [{"role": "system", "content": prompts.SYSTEM_PROMPT}]
+        messages = [{"role": "system", "content": self.system_prompt}]
 
         # 2. Add the selected few-shot example as a complete dialogue
         example_dialogue = self._get_examples_for_task(task_type)
@@ -180,6 +191,7 @@ class MempAgent(BaseAgent):
         if retrieved_memories:
             successful_mems = retrieved_memories.get('successed', [])
             failed_mems = retrieved_memories.get('failed', [])
+            uncertain_mems = retrieved_memories.get('uncertain', [])
 
             successful_mems_formatted = [
                 self._format_retrieved_memory(mem['content']) for mem in successful_mems
@@ -189,9 +201,14 @@ class MempAgent(BaseAgent):
                 self._format_retrieved_memory(mem['content']) for mem in failed_mems
             ] if failed_mems else []
 
+            uncertain_mems_formatted = [
+                self._format_retrieved_memory(mem['content']) for mem in uncertain_mems
+            ] if uncertain_mems else []
+
             memory_parts = [
                 "In addition to the example, you have the following memories from your own past experiences. "
-                "Use them to help you if they are relevant:"
+                "Use them to help you if they are relevant:",
+                "Treat successful memories as strategies to follow, failed memories as warnings about what to avoid, and uncertain memories as tentative hints that may help but are not yet validated."
             ]
 
             if successful_mems_formatted:
@@ -206,7 +223,13 @@ class MempAgent(BaseAgent):
                     "\n".join(failed_mems_formatted)
                 )
 
-            if successful_mems_formatted or failed_mems_formatted:
+            if uncertain_mems_formatted:
+                memory_parts.append(
+                    "--- UNCERTAIN MEMORIES (Related but not yet validated; use cautiously) ---\n" +
+                    "\n".join(uncertain_mems_formatted)
+                )
+
+            if successful_mems_formatted or failed_mems_formatted or uncertain_mems_formatted:
                 memory_context = "\n\n".join(memory_parts)
                 messages.append({"role": "system", "content": memory_context})
 
@@ -225,11 +248,20 @@ class MempAgent(BaseAgent):
             if "Action:" in llm_response:
                 return llm_response.split("Action:")[-1].strip()
             # Fallback if the model doesn't follow the format correctly
-            logger.warning(f"Could not find 'Action:' in LLM response. Returning the full response: '{llm_response}'")
+            logger.warning(f"\nCould not find 'Action:' in LLM response. Returning the full response: >>>{llm_response}<<<")
             return llm_response.strip()
         else:
             return 'look around'
-    def act(self, observation: str, history_messages: List[Dict[str, str]], first_step: bool = False):
+    def act(
+        self,
+        observation: str,
+        history_messages: List[Dict[str, str]],
+        first_step: bool = False,
+        epoch_idx: int = None,
+        game_id: str = None,
+        slot_idx: int = None,
+        step_idx: int = None,
+    ):
         """
         Agent performs one step of action generation.
         Ensures robustness: if LLM fails or returns invalid output, action=None is returned.
@@ -255,15 +287,21 @@ class MempAgent(BaseAgent):
 
         response = None
         try:
-            response = self.llm.generate(current_messages)
+            response = self.llm.generate(
+                current_messages,
+                epoch_idx=epoch_idx,
+                game_id=game_id,
+                slot_idx=slot_idx,
+                step_idx=step_idx,
+            )
         except Exception as e:
             logger.error("LLM generation failed: %s", str(e))
             logger.error("Messages before failure:\n%s", json.dumps(current_messages, indent=2, ensure_ascii=False))
-            response = None  # fallback
+            raise
 
         if not first_step:
             history_messages.append({"role": "user", "content": f"Observation: {observation.strip()}"})
-        history_messages.append({"role": "assistant", "content": response if response is not None else "No response."})
+        history_messages.append({"role": "assistant", "content": response})
 
         action = None
         if response:
@@ -272,6 +310,8 @@ class MempAgent(BaseAgent):
             except Exception as e:
                 logger.warning(f"Action parsing failed for response='{response}': {e}")
                 action = "inventory"
+        else:
+            action = "look around"
 
         return action
 

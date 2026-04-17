@@ -10,9 +10,10 @@ import re
 import json
 import threading
 import time
+import os
 from pathlib import Path
 from typing import List, Dict, Any, Optional
-from openai import OpenAI
+from openai import OpenAI, AzureOpenAI
 try:
     from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 except Exception:  # fallback if tenacity is unavailable
@@ -44,7 +45,7 @@ class OpenAILLM(BaseLLM):
         api_key: str,
         base_url: Optional[str] = None,
         model: str = "gpt-3.5-turbo",
-        default_temperature: float = 0.7,
+        default_temperature: float = 0,
         default_max_tokens: Optional[int] = None,
         token_log_dir: Optional[str] = None,
         token_log_path: Optional[str] = None,
@@ -64,8 +65,6 @@ class OpenAILLM(BaseLLM):
         super().__init__(**kwargs)
 
         # Validate API key
-        if not api_key or api_key.strip() == "":
-            raise ValueError("API key cannot be empty")
 
         self.model = model
         self.base_url = base_url
@@ -73,16 +72,17 @@ class OpenAILLM(BaseLLM):
         self.default_max_tokens = default_max_tokens
         self._token_log_lock = threading.Lock()
         self._token_log_path = self._resolve_token_log_path(token_log_path, token_log_dir)
-
+        self._use_azure_openai = True if  model.lower().startswith("gpt") else False
+        self.api_key = api_key
         # Initialize OpenAI client
-        client_kwargs = {"api_key": api_key}
-        if base_url:
-            client_kwargs["base_url"] = base_url
-            
-        try:
-            self.client = OpenAI(**client_kwargs)
-        except Exception as e:
-            raise LLMError(f"Failed to initialize OpenAI client: {e}")
+        if model.lower().startswith("gpt"):
+            self.client = AzureOpenAI(
+                        azure_endpoint = base_url, 
+                        api_key=api_key,  
+                        api_version= "2024-10-01-preview",
+                        )
+        else:
+             self.client = OpenAI(base_url=self.base_url , api_key = self.api_key)
 
     @staticmethod
     def _resolve_token_log_path(
@@ -204,6 +204,13 @@ class OpenAILLM(BaseLLM):
         Raises:
             LLMError: If generation fails after retries
         """
+        token_usage_context = {
+            "epoch_idx": kwargs.pop("epoch_idx", None),
+            "game_id": kwargs.pop("game_id", None),
+            "slot_idx": kwargs.pop("slot_idx", None),
+            "step_idx": kwargs.pop("step_idx", None),
+        }
+
         # Merge default parameters with provided kwargs.
         #
         # IMPORTANT (LLB compatibility):
@@ -215,7 +222,7 @@ class OpenAILLM(BaseLLM):
             "messages": messages,
             "temperature": kwargs.get("temperature", self.default_temperature),
         }
-
+ 
         # Accept either OpenAI-style `max_tokens` or LLB-style `max_completion_tokens`.
         if "max_tokens" not in kwargs and "max_completion_tokens" in kwargs:
             kwargs["max_tokens"] = kwargs.get("max_completion_tokens")
@@ -230,6 +237,11 @@ class OpenAILLM(BaseLLM):
             if key not in generation_kwargs:
                 generation_kwargs[key] = value
         
+        if self._use_azure_openai:
+            generation_kwargs.pop('temperature')
+            generation_kwargs['max_completion_tokens'] = generation_kwargs['max_tokens']
+            generation_kwargs.pop('max_tokens')
+            
         try:
             response = self.client.chat.completions.create(**generation_kwargs)
             # Inspect finish_reason and usage for diagnostics
@@ -241,16 +253,16 @@ class OpenAILLM(BaseLLM):
                 logging.warning(
                     "LLM generation stopped early (finish_reason=%s). Consider increasing max_tokens (now=%s).",
                     finish_reason,
-                    generation_kwargs.get("max_tokens"),
+                    generation_kwargs.get("max_completion_tokens", -1) if self._use_azure_openai else generation_kwargs.get("max_tokens", -1) ,
                 )
             # Optionally expose basic token usage in debug logs
-            if usage is not None:
-                logging.debug(
-                    "LLM usage: prompt_tokens=%s, completion_tokens=%s, total_tokens=%s",
-                    getattr(usage, "prompt_tokens", None),
-                    getattr(usage, "completion_tokens", None),
-                    getattr(usage, "total_tokens", None),
-                )
+            # if usage is not None:
+            logging.debug(
+                "LLM usage: prompt_tokens=%s, completion_tokens=%s, total_tokens=%s",
+                getattr(usage, "prompt_tokens", None),
+                getattr(usage, "completion_tokens", None),
+                getattr(usage, "total_tokens", None),
+            )
             try:
                 usage_payload = self._usage_to_dict(usage)
                 self._log_token_usage(
@@ -262,6 +274,7 @@ class OpenAILLM(BaseLLM):
                         "prompt_stats": self._summarize_messages(messages),
                         "usage": usage_payload,
                         "finish_reason": finish_reason,
+                        **{k: v for k, v in token_usage_context.items() if v is not None},
                     }
                 )
             except Exception:
@@ -283,6 +296,7 @@ class OpenAILLM(BaseLLM):
                         "prompt_stats": self._summarize_messages(messages),
                         "error": str(e),
                         "status": status,
+                        **{k: v for k, v in token_usage_context.items() if v is not None},
                     }
                 )
             except Exception:
@@ -378,50 +392,3 @@ class OpenAILLM(BaseLLM):
         
         messages = [{"role": "user", "content": prompt}]
         return self.generate(messages, temperature=self.default_temperature, max_tokens=self.default_max_tokens)
-
-
-class MockLLM(BaseLLM):
-    """
-    Mock LLM provider for testing purposes.
-    
-    This provider returns predefined responses and is useful for
-    unit testing without making actual API calls.
-    """
-    
-    def __init__(self, responses: Optional[Dict[str, str]] = None, **kwargs: Any) -> None:
-        """
-        Initialize mock LLM provider.
-        
-        Args:
-            responses: Dictionary mapping input patterns to responses
-            **kwargs: Additional configuration parameters
-        """
-        super().__init__(**kwargs)
-        self.responses = responses or {}
-        self.call_count = 0
-    
-    def generate(self, messages: List[Dict[str, str]], **kwargs: Any) -> str:
-        """Generate mock response."""
-        self.call_count += 1
-        
-        # Extract the user message content
-        user_content = ""
-        for msg in messages:
-            if msg.get("role") == "user":
-                user_content = msg.get("content", "")
-                break
-        
-        # Check for predefined responses
-        for pattern, response in self.responses.items():
-            if pattern.lower() in user_content.lower():
-                return response
-        
-        # Default response
-        return f"Mock response {self.call_count} for: {user_content[:50]}..."
-    
-    def extract_keywords(self, text: str, max_keywords: int = 8) -> List[str]:
-        """Extract mock keywords."""
-        # Simple keyword extraction for testing
-        words = text.lower().split()
-        keywords = [w for w in words if len(w) > 3][:max_keywords]
-        return keywords if keywords else ["test", "keyword"]

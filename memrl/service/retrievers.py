@@ -349,7 +349,7 @@ def get_retriever(
     max_keywords: int = 8,
     embedder: Optional[Any] = None,
 ) -> BaseRetriever:
-    if strategy == RetrieveStrategy.RANDOM:
+    if strategy in (RetrieveStrategy.RANDOM, RetrieveStrategy.RANDOM_FULL, RetrieveStrategy.RANDOM_PARTIAL):
         return RandomRetriever(mos, user_id)
     if strategy == RetrieveStrategy.QUERY:
         return QueryRetriever(mos, user_id)

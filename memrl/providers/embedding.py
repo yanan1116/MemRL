@@ -6,12 +6,12 @@ for various embedding services including OpenAI, local models, etc.
 """
 
 from typing import List, Optional, Any, Dict
-import json
+import json,os
 import threading
 import time
 from pathlib import Path
 import numpy as np
-from openai import OpenAI
+from openai import OpenAI, AzureOpenAI
 try:
     from tenacity import retry, stop_after_attempt, wait_exponential
 except Exception:
@@ -58,8 +58,8 @@ class OpenAIEmbedder(BaseEmbedder):
         super().__init__(max_text_len=max_text_len, **kwargs)
 
         # Validate API key
-        if not api_key or api_key.strip() == "":
-            raise ValueError("API key cannot be empty")
+        # if not api_key or api_key.strip() == "":
+        #     raise ValueError("API key cannot be empty")
 
         self.model = model
         self.base_url = base_url
@@ -67,15 +67,8 @@ class OpenAIEmbedder(BaseEmbedder):
         self._token_log_path = self._resolve_token_log_path(token_log_path, token_log_dir)
 
         # Initialize OpenAI client
-        client_kwargs = {"api_key": api_key}
-        if base_url:
-            client_kwargs["base_url"] = base_url
-            
-        try:
-            self.client = OpenAI(**client_kwargs)
-        except Exception as e:
-            raise EmbedderError(f"Failed to initialize OpenAI client: {e}")
-
+        self.client = OpenAI(base_url=base_url , api_key = api_key)
+             
     @staticmethod
     def _resolve_token_log_path(
         token_log_path: Optional[str],

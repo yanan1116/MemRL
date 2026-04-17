@@ -164,7 +164,11 @@ class ProceduralMemory:
             tags.append("avefact")
         elif self.memp_metadata.retrieve_strategy == RetrieveStrategy.QUERY:
             tags.append("query")
-        elif self.memp_metadata.retrieve_strategy == RetrieveStrategy.RANDOM:
+        elif self.memp_metadata.retrieve_strategy in (
+            RetrieveStrategy.RANDOM,
+            RetrieveStrategy.RANDOM_FULL,
+            RetrieveStrategy.RANDOM_PARTIAL,
+        ):
             tags.append("random")
             
         return tags
