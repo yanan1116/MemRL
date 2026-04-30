@@ -20,8 +20,7 @@ class LLMConfig(BaseModel):
     api_key: str = Field(default="yyy", 
                         description="API key for authentication")
     base_url: Optional[str] = Field(default="https://api.openai.com/v1", description="Base URL for API")
-    # Optional Azure/OpenAI-style API versioning. Some runners pass this through.
-    api_version: Optional[str] = Field(default=None, description="Optional API version for some providers (e.g. Azure OpenAI)")
+
     model: str = Field(default="gpt-4.1-mini", description="Model name")
     temperature: float = Field(default=0.7, ge=0, le=2, description="Generation temperature")
     max_tokens: Optional[int] = Field(default=None, gt=0, description="Maximum tokens")
@@ -42,7 +41,6 @@ class EmbeddingConfig(BaseModel):
     api_key: str = Field(default="yyy",
                         description="API key for authentication")
     base_url: Optional[str] = Field(default="https://api.openai.com/v1", description="Base URL for API")
-    api_version: Optional[str] = Field(default=None, description="Optional API version for some providers (e.g. Azure OpenAI)")
     model: str = Field(default="text-embedding-3-large", description="Embedding model name")
     max_text_len: int = Field(
         default=8196,
@@ -224,10 +222,6 @@ class RLConfig(BaseModel):
     weight_q: float = Field(default=0.5, description="Weight for Q-value in combined score")
     q_epsilon: float = Field(default=0.05, ge=0.0, description="Small band around zero used to define uncertain memories")
     uncertain_visit_threshold: int = Field(default=2, ge=0, description="Maximum visit_count for zero-Q memories to be considered exploratory")
-    tri_channel_enabled: bool = Field(default=False, description="Enable tri-channel retrieval with separate positive/negative/uncertain memory channels")
-    k_pos: int = Field(default=3, ge=0, description="Number of positive memories to inject when tri-channel retrieval is enabled")
-    k_neg: int = Field(default=1, ge=0, description="Number of negative memories to inject when tri-channel retrieval is enabled")
-    k_zero: int = Field(default=1, ge=0, description="Number of uncertain zero-Q memories to inject when tri-channel retrieval is enabled")
     use_thompson_sampling: bool = Field(default=False, description="Use Thompson-sampled success likelihood instead of deterministic Q for stage-2 ranking")
 
 class MempConfig(BaseModel):

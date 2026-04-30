@@ -1601,46 +1601,7 @@ class MemoryService:
                 selected = _random_pick(enriched_sorted, topk)
             elif is_random_partial:
                 selected = _random_pick(enriched_sorted, topk)
-            elif getattr(self.rl_config, "tri_channel_enabled", False):
-                k_pos = max(0, int(getattr(self.rl_config, "k_pos", 0)))
-                k_neg = max(0, int(getattr(self.rl_config, "k_neg", 0)))
-                k_zero = max(0, int(getattr(self.rl_config, "k_zero", 0)))
 
-                positive_candidates = [
-                    c for c in enriched_sorted if c.get("memory_bucket") == "positive"
-                ]
-                negative_candidates = [
-                    c for c in enriched_sorted if c.get("memory_bucket") == "negative"
-                ]
-                uncertain_candidates = sorted(
-                    (
-                        c
-                        for c in enriched_sorted
-                        if c.get("memory_bucket") == "uncertain"
-                        and _coerce_int(c.get("visit_count", 0))
-                        <= uncertain_visit_threshold
-                    ),
-                    key=lambda x: (x["similarity"], x["score"]),
-                    reverse=True,
-                )
-
-                selected = []
-                seen_memory_ids: set[str] = set()
-
-                for group, limit in (
-                    (positive_candidates, k_pos),
-                    (negative_candidates, k_neg),
-                    (uncertain_candidates, k_zero),
-                ):
-                    for cand in group[:limit]:
-                        mem_id = str(cand.get("memory_id"))
-                        if mem_id in seen_memory_ids:
-                            continue
-                        seen_memory_ids.add(mem_id)
-                        selected.append(cand)
-
-                if not selected:
-                    selected = enriched_sorted[:topk]
             elif not getattr(self, "dedup_by_task_id", False):
                 if random.random() < self.rl_config.epsilon:
                     selected = random.sample(enriched_sorted, topk)

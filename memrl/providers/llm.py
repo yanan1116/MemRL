@@ -13,7 +13,7 @@ import time
 import os
 from pathlib import Path
 from typing import List, Dict, Any, Optional
-from openai import OpenAI, AzureOpenAI
+from openai import OpenAI
 try:
     from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 except Exception:  # fallback if tenacity is unavailable
@@ -75,14 +75,7 @@ class OpenAILLM(BaseLLM):
         self._use_azure_openai = True if  model.lower().startswith("gpt") else False
         self.api_key = api_key
         # Initialize OpenAI client
-        if model.lower().startswith("gpt"):
-            self.client = AzureOpenAI(
-                        azure_endpoint = base_url, 
-                        api_key=api_key,  
-                        api_version= "2024-10-01-preview",
-                        )
-        else:
-             self.client = OpenAI(base_url=self.base_url , api_key = self.api_key)
+        self.client = OpenAI(base_url=self.base_url , api_key = self.api_key)
 
     @staticmethod
     def _resolve_token_log_path(
@@ -238,7 +231,6 @@ class OpenAILLM(BaseLLM):
                 generation_kwargs[key] = value
         
         if self._use_azure_openai:
-            generation_kwargs.pop('temperature')
             generation_kwargs['max_completion_tokens'] = generation_kwargs['max_tokens']
             generation_kwargs.pop('max_tokens')
             

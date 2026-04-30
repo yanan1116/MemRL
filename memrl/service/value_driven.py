@@ -42,10 +42,6 @@ class RLConfig:
     weight_q: float = 0.5          # weight for Q-value in combined score
     q_epsilon: float = 0.05        # small band around zero used to define "uncertain" memories
     uncertain_visit_threshold: int = 2  # low-visit zero-Q memories are exploratory
-    tri_channel_enabled: bool = False   # retrieve positive / negative / uncertain channels separately
-    k_pos: int = 3                 # positive channel size when tri-channel retrieval is enabled
-    k_neg: int = 1                 # negative channel size when tri-channel retrieval is enabled
-    k_zero: int = 1                # uncertain zero-Q channel size when tri-channel retrieval is enabled
     use_thompson_sampling: bool = False  # sample memory utility from Beta posterior at retrieval time
 
 

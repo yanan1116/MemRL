@@ -17,7 +17,6 @@ llm:
   # Create a local copy `configs/rl_bcb_config.local.yaml` (gitignored) for private values.
   api_key: "sk-REPLACE_ME"
   base_url: "https://api.openai.com/v1"
-  api_version: null
   model: "gpt-4o-mini"
   temperature: 0.0
   max_tokens: 12800
@@ -28,7 +27,6 @@ embedding:
   # Create a local copy `configs/rl_bcb_config.local.yaml` (gitignored) for private values.
   api_key: "sk-REPLACE_ME"
   base_url: "https://api.openai.com/v1"
-  api_version: null
   model: "text-embedding-3-large"
   max_text_len: 8196
 

@@ -11,7 +11,7 @@ import threading
 import time
 from pathlib import Path
 import numpy as np
-from openai import OpenAI, AzureOpenAI
+from openai import OpenAI
 try:
     from tenacity import retry, stop_after_attempt, wait_exponential
 except Exception:

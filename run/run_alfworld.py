@@ -156,19 +156,11 @@ def main():
         temp_dir = tempfile.mkdtemp(prefix="memp_alfworld_run_")
         logger.info(f"Using temporary directory for runtime artifacts: {temp_dir}")
 
-        if cfg.llm.provider == "azure":
-            mos_llm_config = {
-                "model_name_or_path": cfg.llm.model,
-                "api_key": cfg.llm.api_key,
-                "base_url": cfg.llm.base_url,
-                "api_version": cfg.llm.api_version,
-            }
-        else:
-            mos_llm_config = {
-                "model_name_or_path": cfg.llm.model,
-                "api_key": cfg.llm.api_key,
-                "api_base": cfg.llm.base_url,
-            }
+        mos_llm_config = {
+            "model_name_or_path": cfg.llm.model,
+            "api_key": cfg.llm.api_key,
+            "api_base": cfg.llm.base_url,
+        }
 
         mos_config = {
             "chat_model": {
