@@ -140,14 +140,12 @@ def main():
             default_temperature=config.llm.temperature,
             default_max_tokens=config.llm.max_tokens,
             provider=config.llm.provider,
-            api_version=config.llm.api_version,
         )
         embedding_provider = OpenAIEmbedder(
             api_key=config.embedding.api_key,
             base_url=config.embedding.base_url,
             model=config.embedding.model,
             provider=config.embedding.provider,
-            api_version=config.embedding.api_version,
         )
 
         # --- Use the detailed MemoryService setup from your demo script ---
@@ -158,12 +156,6 @@ def main():
         update_strategy = UpdateStrategy(config.memory.update_strategy)
 
         # 1. Create the mos_config dictionary
-        # Note: MemOS config validation does not allow 'api_version', so we rely on env vars.
-        if config.llm.provider == "azure":
-            os.environ["OPENAI_API_TYPE"] = "azure"
-        if config.llm.api_version:
-            os.environ["OPENAI_API_VERSION"] = config.llm.api_version
-
         mos_config = {
             "chat_model": {
                 "backend": "openai",
