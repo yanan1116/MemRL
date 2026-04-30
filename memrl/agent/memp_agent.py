@@ -1,7 +1,7 @@
 # FILE: memp/agent/memp_agent.py
 
 import logging
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple, Optional
 import copy
 import ast
 
@@ -50,6 +50,64 @@ class MempAgent(BaseAgent):
                         return copy.deepcopy(example['example'])
         return "No specific examples found for this task type."
 
+    def _split_retrieved_memory_content(self, raw_content: str) -> Tuple[str, str, str]:
+        """Split retrieved memory into header/body and describe the body type."""
+        if '\n\nTRAJECTORY:\n' in raw_content:
+            header, body = raw_content.split('\n\nTRAJECTORY:\n', 1)
+            return header, body, "trajectory"
+
+        if '\n\nFailed approach:\n' in raw_content:
+            header, body = raw_content.split('\n\nFailed approach:\n', 1)
+            return header, body, "trajectory"
+
+        if raw_content.startswith("Task:") and '\n\n' in raw_content:
+            header, body = raw_content.split('\n\n', 1)
+            return header, body, "unknown"
+
+        return "", raw_content, "raw"
+
+    def _parse_trajectory_list(
+        self, trajectory_str: str
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Parse a stored trajectory if the content looks like a Python list literal."""
+        trajectory_str = trajectory_str.strip()
+        if not trajectory_str.startswith("["):
+            return None
+
+        trajectory_list = ast.literal_eval(trajectory_str)
+        if not isinstance(trajectory_list, list):
+            raise ValueError("Retrieved memory trajectory is not a list.")
+        return trajectory_list
+
+    def _clean_trajectory_messages(self, trajectory_list: List[Dict[str, Any]]) -> str:
+        """Keep only the relevant user/assistant turns from a stored trajectory."""
+        turn_idx = -1
+        for i, msg in enumerate(trajectory_list):
+            if (
+                isinstance(msg, dict)
+                and msg.get("role") == "user"
+                and isinstance(msg.get("content", ""), str)
+                and "Now, it's your turn" in msg["content"]
+            ):
+                turn_idx = i
+
+        if turn_idx != -1:
+            trajectory_list = trajectory_list[turn_idx:]
+
+        clean_trajectory = []
+        for message in trajectory_list:
+            if not isinstance(message, dict):
+                continue
+
+            role = message.get("role")
+            content = message.get("content", "")
+            if role == "assistant":
+                clean_trajectory.append(f"> {content}")
+            elif role == "user" and isinstance(content, str):
+                clean_trajectory.append(content)
+
+        return "\n".join(clean_trajectory)
+
     def _format_retrieved_memory(self, raw_content: str) -> str:
         """
         [NEW HELPER METHOD]
@@ -79,66 +137,40 @@ class MempAgent(BaseAgent):
             if 'SCRIPT:' in header:
                 script_part = header.split('SCRIPT:')[1].strip()
                 clean_parts.append(f"Archived Script:\n{script_part}")
-            if 'What went wrong:' in header:
-                reflection_part = header.split('What went wrong:')[1].strip()
-                clean_parts.append(f"Archived Script:\n{reflection_part}")                
-            # 3. Parse the trajectory string into a Python list
-            # ast.literal_eval is a safe way to evaluate a string containing a Python literal
-            trajectory_list = ast.literal_eval(trajectory_str)
-            
-            # 4. Keep only the portion after the last "Now, it's your turn"
-            turn_idx = -1
-            for i, msg in enumerate(trajectory_list):
-                if msg.get("role") == "user" and isinstance(msg.get("content", ""), str) and "Now, it's your turn" in msg["content"]:
-                    turn_idx = i
-            if turn_idx != -1:
-                trajectory_list = trajectory_list[turn_idx:]
+        if 'What went wrong:' in header:
+            reflection_part = header.split('What went wrong:', 1)[1].strip()
+            if reflection_part:
+                clean_parts.append(f"Archived Script:\n{reflection_part}")
 
-            clean_trajectory = []
-            for message in trajectory_list:
-                role = message.get("role")
-                content = message.get("content", "")
-                if role == "assistant":
-                    clean_trajectory.append(f"> {content}")
-                elif role == "user" and isinstance(content, str):
-                    clean_trajectory.append(content)
-            
-            if clean_trajectory:
-                clean_parts.append("Archived Trajectory:\n" + "\n".join(clean_trajectory))
-            
-            return "\n\n".join(clean_parts)
-            
+        try:
+            trajectory_list = self._parse_trajectory_list(body)
         except Exception as e:
-            logger.warning(f"Could not parse retrieved memory content, using raw content. Error: {e}")
-            idx = raw_content.find('[')
-            if idx != -1:
-                raw_content = raw_content[idx:]
-            # Fallback to returning the raw content if parsing fails
-            try:
-                trajectory_list = ast.literal_eval(raw_content)
-            except Exception:
-                return raw_content
+            logger.warning(
+                "Could not parse retrieved memory trajectory, using raw content. Error: %s",
+                e,
+            )
+            trajectory_label = (
+                "Archived Trajectory"
+                if body_type == "trajectory" or body.startswith("[")
+                else "Archived Script"
+            )
+            if body:
+                clean_parts.append(f"{trajectory_label}:\n{body}")
+                return "\n\n".join(clean_parts)
+            return raw_content
 
-            # 4. Keep only the portion after the last "Now, it's your turn"
-            turn_idx = -1
-            for i, msg in enumerate(trajectory_list):
-                if msg.get("role") == "user" and isinstance(msg.get("content", ""), str) and "Now, it's your turn" in msg["content"]:
-                    turn_idx = i
-            if turn_idx != -1:
-                trajectory_list = trajectory_list[turn_idx:]
-
-            clean_trajectory = []
-            for message in trajectory_list:
-                role = message.get("role")
-                content = message.get("content", "")
-                if role == "assistant":
-                    clean_trajectory.append(f"> {content}")
-                elif role == "user" and isinstance(content, str) and content.startswith("Observation:"):
-                    clean_trajectory.append(content)
-            
+        if trajectory_list is not None:
+            clean_trajectory = self._clean_trajectory_messages(trajectory_list)
             if clean_trajectory:
-                clean_parts.append("Archived Trajectory:\n" + "\n".join(clean_trajectory))
+                clean_parts.append("Archived Trajectory:\n" + clean_trajectory)
+            return "\n\n".join(clean_parts) or raw_content
+
+        if body and body != raw_content:
+            body_label = "Archived Trajectory" if body_type == "trajectory" else "Archived Script"
+            clean_parts.append(f"{body_label}:\n{body}")
             return "\n\n".join(clean_parts)
+
+        return "\n\n".join(clean_parts) or raw_content
         
     def _construct_messages(self, task_description: str, retrieved_memories: List[Dict], task_type: str) -> List[Dict[str, str]]:
         """

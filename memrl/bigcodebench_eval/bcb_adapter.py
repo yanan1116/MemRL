@@ -42,7 +42,7 @@ class MempBCBDecoder:
         max_new_tokens: int = 1280,
         system_prompt: str = "",
         retrieve_k: int = 5,
-        memory_budget_tokens: int = 2000,
+        memory_budget_tokens: int = 0,
     ) -> None:
         self.name = name
         self._llm = llm_provider
@@ -105,7 +105,8 @@ class MempBCBDecoder:
             if not content:
                 continue
 
-            if len(content) > self._budget // len(candidates):
+            # budget=0 means unlimited – skip truncation entirely.
+            if self._budget > 0 and len(content) > self._budget // len(candidates):
                 content = content[: self._budget // len(candidates)] + "..."
 
             parts.append(f"## Example {i} [{str(outcome).upper()}]")

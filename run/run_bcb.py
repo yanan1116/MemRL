@@ -257,7 +257,7 @@ def main() -> None:
         memory_budget_tokens=(
             int(args.memory_budget_tokens)
             if args.memory_budget_tokens is not None
-            else 2000
+            else cfg.memory.memory_budget_tokens
         ),
         bcb_repo=args.bcb_repo,
         untrusted_hard_timeout_s=float(args.untrusted_hard_timeout),
