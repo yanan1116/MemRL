@@ -199,23 +199,3 @@ nohup python run/run_alfworld.py \
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-############################################################
-
-pkill -f -9 run_alfworld.py
-
-codex resume 019d4453-c409-7b53-95d8-b47945d5bcb0
-
-cat alfworld_Qwen2.5-7B-Instruct_topk5_random_full.log|grep Epoch|grep complete
