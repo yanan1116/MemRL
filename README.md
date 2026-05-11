@@ -73,7 +73,7 @@ The following ALFWorld results compare runs with and without Thompson sampling (
 
 ### Qwen2.5-7B-Instruct
 
-| `memory.k_retrieve` | `rl_config.topk` | In-Dist (w/ TS) | Out-Dist (w/ TS) | In-Dist (w/o TS) | Out-Dist (w/o TS) |
+| `k_retrieve` | `topk` | In-Dist (w/ TS) | Out-Dist (w/ TS) | In-Dist (w/o TS) | Out-Dist (w/o TS) |
 | ---: | ---: | --- | --- | --- | --- |
 | 10 | 3 | 70.00% (98/140) | 76.87% (103/134) | 60.71% (85/140) | 57.46% (77/134) |
 | 10 | 5 | 75.71% (106/140) | 79.10% (106/134) | 57.86% (81/140) | 65.67% (88/134) |
@@ -81,7 +81,7 @@ The following ALFWorld results compare runs with and without Thompson sampling (
 
 ### Qwen3-30B-A3B-Instruct-2507-FP8
 
-| `memory.k_retrieve` | `rl_config.topk` | In-Dist (w/ TS) | Out-Dist (w/ TS) | In-Dist (w/o TS) | Out-Dist (w/o TS) |
+| `k_retrieve` | `topk` | In-Dist (w/ TS) | Out-Dist (w/ TS) | In-Dist (w/o TS) | Out-Dist (w/o TS) |
 | ---: | ---: | --- | --- | --- | --- |
 | 10 | 4 | 87.14% (122/140) | 88.81% (119/134) | 81.43% (114/140) | 79.85% (107/134) |
 | 10 | 10 | 88.57% (124/140) | 91.04% (122/134) | 59.29% (83/140) | 58.65% (78/133) |
